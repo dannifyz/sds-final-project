@@ -1,69 +1,119 @@
-import Image from "next/image";
+"use client";
 
-export default function Home() {
+import jsQR from "jsqr";
+import { useState, type ChangeEvent } from "react";
+import { api, type VerifyResult } from "@/lib/api";
+
+type State =
+  | { kind: "idle" }
+  | { kind: "busy"; message: string }
+  | { kind: "error"; message: string }
+  | { kind: "done"; result: VerifyResult };
+
+// Large phone photos are slow to scan at full size, but downscaling too far
+// loses the fine modules of a long JWT, so try a few sizes.
+const SCAN_WIDTHS = [1600, 1000, Infinity];
+
+async function readQR(file: File): Promise<string | null> {
+  const bitmap = await createImageBitmap(file);
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) return null;
+
+  for (const maxWidth of SCAN_WIDTHS) {
+    const scale = Math.min(1, maxWidth / bitmap.width);
+    canvas.width = Math.round(bitmap.width * scale);
+    canvas.height = Math.round(bitmap.height * scale);
+    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    const { data, width, height } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const code = jsQR(data, width, height, { inversionAttempts: "attemptBoth" });
+    if (code?.data) return code.data;
+  }
+  return null;
+}
+
+export default function ScanPage() {
+  const [state, setState] = useState<State>({ kind: "idle" });
+  const [preview, setPreview] = useState<string | null>(null);
+
+  async function onFile(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+
+    setPreview((old) => {
+      if (old) URL.revokeObjectURL(old);
+      return URL.createObjectURL(file);
+    });
+
+    try {
+      setState({ kind: "busy", message: "Reading QR code…" });
+      const token = await readQR(file);
+      if (!token) {
+        setState({ kind: "error", message: "No QR code found in this image." });
+        return;
+      }
+      setState({ kind: "busy", message: "Verifying ticket…" });
+      setState({ kind: "done", result: await api.verify(token) });
+    } catch {
+      setState({ kind: "error", message: "Could not read this image." });
+    }
+  }
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert h-5 w-[100px]"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the{" "}
-            <code className="rounded bg-black/[.06] px-1.5 py-0.5 font-mono text-[0.9em] dark:bg-white/[.08]">
-              page.tsx
-            </code>{" "}
-            file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert h-[14px] w-4"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={14}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
+    <div className="space-y-6">
+      <div>
+        <h1 className="text-2xl font-semibold tracking-tight">Scan ticket</h1>
+        <p className="text-sm text-zinc-500">Upload a photo or screenshot of a ticket QR code to verify it.</p>
+      </div>
+
+      <label className="card flex cursor-pointer flex-col items-center gap-3 border-dashed text-center hover:bg-zinc-50 dark:hover:bg-zinc-800/50">
+        {/* eslint-disable-next-line @next/next/no-img-element -- local blob preview */}
+        {preview && <img src={preview} alt="Uploaded ticket" className="max-h-64 rounded-lg" />}
+        <span className="btn">{preview ? "Choose another image" : "Upload image"}</span>
+        <span className="text-xs text-zinc-500">PNG, JPG or any image your browser can open</span>
+        <input type="file" accept="image/*" onChange={onFile} className="sr-only" />
+      </label>
+
+      {state.kind === "busy" && <p className="text-sm text-zinc-500">{state.message}</p>}
+      {state.kind === "error" && <p className="alert-error">{state.message}</p>}
+      {state.kind === "done" && <VerifyCard result={state.result} />}
+    </div>
+  );
+}
+
+function VerifyCard({ result }: { result: VerifyResult }) {
+  if (!result.valid) {
+    return (
+      <div className="card border-red-300 dark:border-red-900">
+        <p className="text-lg font-semibold text-red-600 dark:text-red-400">✕ Invalid ticket</p>
+        <p className="mt-1 text-sm text-zinc-500">{result.error}</p>
+      </div>
+    );
+  }
+
+  const { ticket } = result;
+  const rows: [string, string | undefined][] = [
+    ["Event", ticket.event],
+    ["Attendee", ticket.attendeeName],
+    ["Seat", ticket.seat],
+    ["Issued", ticket.iat ? new Date(ticket.iat * 1000).toLocaleString() : undefined],
+    ["Ticket ID", ticket.jti],
+  ];
+
+  return (
+    <div className="card border-emerald-300 dark:border-emerald-900">
+      <p className="text-lg font-semibold text-emerald-600 dark:text-emerald-400">✓ Valid ticket</p>
+      <dl className="mt-4 grid grid-cols-[auto_1fr] gap-x-6 gap-y-2 text-sm">
+        {rows.map(([k, v]) =>
+          v ? (
+            <div key={k} className="contents">
+              <dt className="text-zinc-500">{k}</dt>
+              <dd className="break-all font-medium">{v}</dd>
+            </div>
+          ) : null,
+        )}
+      </dl>
     </div>
   );
 }
