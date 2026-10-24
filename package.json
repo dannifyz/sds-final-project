@@ -1,0 +1,24 @@
+{
+  "name": "sds-final-project",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dannifyz/sds-final-project.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/dannifyz/sds-final-project/issues"
+  },
+  "homepage": "https://github.com/dannifyz/sds-final-project#readme",
+  "devDependencies": {
+    "concurrently": "^10.0.6"
+  }
+}
