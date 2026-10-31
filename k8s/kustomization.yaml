@@ -1,0 +1,9 @@
+resources:
+  - app.yaml
+  - traefik.yaml
+configMapGenerator:
+  - name: nginx-conf
+    files:
+      - default.conf=nginx.conf
+generatorOptions:
+  disableNameSuffixHash: true
