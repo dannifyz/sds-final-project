@@ -34,7 +34,7 @@ Tickets are signed JWTs (HS256), so nothing is stored in a database. The whole a
 | `signing-service` | 8082 | `POST /sign` (admin only) and `GET /verify` (public)                          |
 | `qr-service`      | 8083 | `POST /qr` turns a token into a PNG. Internal only                            |
 
-Each service runs 2 replicas. Traefik (built into k3s) receives requests on port 80 of every node and forwards them to `nginx`.
+Each service runs 1 replica by default (5 services on 5 Pis, the **5x1** mode), or 2 with `REPLICAS=2 ./deploy.sh` (**5x2**). The master runs no app pods. Traefik (built into k3s) receives requests on port 80 of every node and forwards them to `nginx`.
 
 ### Request flow
 
@@ -59,59 +59,62 @@ A single `POST /api/sign` is served by **four containers on separate pods**: ngi
 | ----------------------------------- | ---------------------------------------------------------------------------------------------------- |
 | At least N distinct container images | 5 images: `web`, `auth-service`, `signing-service`, `qr-service`, `nginx`                            |
 | A request uses 2 or more containers | `/api/sign` goes through nginx, signing, auth and qr                                                 |
-| Containers on different nodes       | `topologySpreadConstraints` spreads replicas across nodes                                            |
-| Survives losing any one Pi          | 2 replicas of everything, readiness probes, pods evicted 10 s after a node goes down, Traefik also has 2 replicas |
+| Containers on different nodes       | `topologySpreadConstraints` keeps replicas of one service on different Pis and spreads all pods evenly |
+| Survives losing any one Pi          | Pods of a dead Pi are evicted 10 s after the node goes down and rescheduled on the other Pis. Readiness probes remove dead pods from the Services. Traefik has 2 replicas |
 
 ## 3. Build the cluster
 
-Layout: your laptop (or an Ubuntu VM on it) is the **master**, and each Raspberry Pi is a **worker**. The cluster uses [k3s](https://k3s.io).
+The laptop is the **master** (control plane only, no app pods) and each Pi is a **worker**, on [k3s](https://k3s.io). Below, the master is `192.168.1.101` and the Pis are `192.168.1.100`, `.102`, and so on. Use your own addresses.
 
-### Hardware and network
+### Network
 
-- TP-Link TL-WR841N router, laptop master, Raspberry Pi 3 B+ workers, Ethernet cables.
-- Connect the master and every Pi to the router's LAN ports (wired is preferred). The router's WAN port needs internet so k3s and the images can be downloaded.
-- Reserve a fixed IP for the master and for each Pi in the router's DHCP settings.
-- Check each Pi with `ping <pi-ip>` and `ssh <user>@<pi-ip>`.
+- TL-WR841N router, laptop, 5 Raspberry Pi 3 B+. The router has 4 LAN ports, so add a switch or put some Pis on Wi-Fi.
+- Reserve a fixed IP per machine in the router's DHCP settings. Check each with `ping` and `ssh`.
+- Setup needs internet on the master and every Pi (a phone hotspot on Wi-Fi works). Cluster traffic stays on the cable.
 
-### Prepare each Pi
+### Each Pi
 
-1. Flash **Raspberry Pi OS Lite (64-bit)** or **Ubuntu Server (arm64)** with Raspberry Pi Imager. Enable SSH.
-2. Turn on memory cgroups. Add this to the end of the single line in `/boot/firmware/cmdline.txt` (`/boot/cmdline.txt` on older images):
+1. Flash **Raspberry Pi OS Lite (64-bit)** and enable SSH.
+2. Append `cgroup_memory=1 cgroup_enable=memory` to the single line in `/boot/firmware/cmdline.txt`.
+3. Point flannel (the pod network) at the cable, then reboot:
 
+   ```sh
+   sudo mkdir -p /etc/rancher/k3s
+   echo 'flannel-iface: eth0' | sudo tee /etc/rancher/k3s/config.yaml
+   sudo reboot
    ```
-   cgroup_memory=1 cgroup_enable=memory
-   ```
 
-3. Reboot with `sudo reboot`.
+### Master
 
-### Install the master
-
-Use an Ubuntu machine with at least 2 CPU cores, on the same LAN as the Pis (a VM needs a bridged adapter on the wired interface).
+Find the Ethernet interface name with `ip -br addr`, then run:
 
 ```sh
-curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server --node-ip <master-ip> --tls-san <master-ip> --kube-controller-manager-arg=node-monitor-grace-period=20s" sh -
+curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=v1.37.1+k3s1 INSTALL_K3S_EXEC="server --node-ip 192.168.1.101 --advertise-address 192.168.1.101 --tls-san 192.168.1.101 --flannel-iface <ethernet-interface> --node-taint CriticalAddonsOnly=true:NoExecute --write-kubeconfig-mode 644 --kube-controller-manager-arg=node-monitor-grace-period=20s" sh -
 sudo cat /var/lib/rancher/k3s/server/node-token
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 ```
 
-The `node-monitor-grace-period` flag makes the cluster notice a dead Pi after 20 s instead of 40 s.
+- `--node-ip` and `--flannel-iface` keep pod traffic on the cable. Without them pods on different nodes cannot talk when the laptop also has Wi-Fi.
+- The taint keeps app pods off the master. k3s's own add-ons tolerate it, so the master's IP still answers on port 80.
+- `node-monitor-grace-period=20s` detects a dead Pi in 20 s instead of 40 s. The pinned version avoids `update.k3s.io`.
 
 ### Join the Pis
 
-Run on every Pi:
+On every Pi, with the token and that Pi's own IP:
 
 ```sh
-curl -sfL https://get.k3s.io | K3S_URL=https://<master-ip>:6443 K3S_TOKEN=<token> INSTALL_K3S_EXEC="agent --kubelet-arg=node-status-update-frequency=5s" sh -
+curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=v1.37.1+k3s1 K3S_URL=https://192.168.1.101:6443 K3S_TOKEN=<token> INSTALL_K3S_EXEC="agent --node-ip <this-pi-ip> --kubelet-arg=node-status-update-frequency=5s" sh -
 ```
 
-### Check the cluster
+If a Pi cannot reach github.com, copy `k3s-arm64` over with `scp` and use the k3s [air-gap install](https://docs.k3s.io/installation/airgap).
 
-On the master:
+### Check
 
 ```sh
-sudo k3s kubectl get nodes
+kubectl get nodes -o wide
 ```
 
-Every Pi should show `Ready`. To use `kubectl` from another machine, copy `/etc/rancher/k3s/k3s.yaml` to `~/.kube/config` and replace `127.0.0.1` with `<master-ip>`.
+Every Pi and the master should be `Ready`. If a Pi is missing after a minute, run `sudo journalctl -u k3s-agent -n 30` on it.
 
 ## 4. Deploy the app
 
@@ -119,31 +122,23 @@ You need `kubectl` pointed at the cluster, and this repo on that machine.
 
 ### 4.1 Images
 
-The manifests use `sds/<name>:latest`. For a real cluster the images must be in a registry the Pis can pull from. Build for both architectures, because pods can land on the Pis (arm64) or on the master (amd64):
+The images are public at `ghcr.io/poongeta/{auth-service,signing-service,qr-service,web}` (arm64 and amd64), and `k8s/kustomization.yaml` already points at them. nginx comes from Docker Hub.
+
+To use your own registry, build and push, then edit the `images:` block in `k8s/kustomization.yaml`:
 
 ```sh
-docker login <registry>
+docker login ghcr.io
 docker buildx create --use
 for s in auth-service signing-service qr-service; do
-  docker buildx build --platform linux/arm64,linux/amd64 -f apps/$s/Dockerfile -t <registry>/$s:latest --push .
+  docker buildx build --platform linux/arm64,linux/amd64 -f apps/$s/Dockerfile -t ghcr.io/<you>/$s:latest --push .
 done
-docker buildx build --platform linux/arm64,linux/amd64 -t <registry>/web:latest --push apps/web
+docker buildx build --platform linux/arm64,linux/amd64 -t ghcr.io/<you>/web:latest --push apps/web
 ```
 
-The images need to be public, or you must add an `imagePullSecret`. The web build is slow under emulation, so do it ahead of time.
+Before the demo, cache every image on every Pi so a replacement pod can start anywhere without internet. Run it after the first `./deploy.sh`, because it reads the image list from the cluster:
 
-Then add this to `k8s/kustomization.yaml`:
-
-```yaml
-images:
-  - name: sds/auth-service
-    newName: <registry>/auth-service
-  - name: sds/signing-service
-    newName: <registry>/signing-service
-  - name: sds/qr-service
-    newName: <registry>/qr-service
-  - name: sds/web
-    newName: <registry>/web
+```sh
+./preload.sh pipatch@192.168.1.100 pipatch@192.168.1.102
 ```
 
 ### 4.2 Secrets and deploy
@@ -164,7 +159,7 @@ The script creates a Kubernetes Secret from `.env`, applies `k8s/` and waits unt
 kubectl get pods -o wide
 ```
 
-You should see 2 pods of each service, spread over different nodes.
+You should see 1 pod of each service, spread over the Pis. For two replicas of each service run `REPLICAS=2 ./deploy.sh`, or switch a running cluster with `kubectl scale deploy --all --replicas=2` (back to one with `--replicas=1`).
 
 ## 5. Check that it works
 
@@ -190,28 +185,21 @@ Use the master's IP as the entry point. Port 80 on every node works, but a Pi yo
 
 ## 6. Fault tolerance
 
-Watch the pods in one terminal:
+In two terminals, watch the pods and send a request every second:
 
 ```sh
 kubectl get pods -o wide -w
-```
-
-Send a request every second in another:
-
-```sh
 while true; do BASE_URL=http://<master-ip> ./test.sh >/dev/null 2>&1 && echo "$(date +%T) OK" || echo "$(date +%T) FAIL"; sleep 1; done
 ```
 
-Then pull a Pi offline (unplug its power or Ethernet cable). Expected result:
+Pull a Pi offline (Ethernet cable or power). Expected:
 
 1. The node shows `NotReady` after about 20 s.
-2. Its pods go to `Terminating`, and 10 s later replacements start on the remaining nodes.
-3. A few `FAIL` lines may appear. Requests succeed again roughly 15 to 25 s after the Pi went down, without any manual step.
-4. Plug the Pi back in. It rejoins as `Ready`.
+2. Its pods go to `Terminating` and replacements start on the other Pis (`tolerationSeconds: 10` makes this quick instead of 5 minutes).
+3. In 5x1, requests needing the lost service fail until its replacement is `Running`, about 30 to 60 s. This is allowed. In 5x2 the other replica keeps serving, and only a few `FAIL` lines appear at first. Afterwards everything is `OK` with no manual step.
+4. Plug the Pi back in and wait for `Ready`. Pods do not move back.
 
-Why it works: every service has 2 replicas on different nodes, readiness probes remove dead pods from the Services, and `tolerationSeconds: 10` makes Kubernetes reschedule pods quickly instead of the default 5 minutes. Do not pull the master.
-
-If a node only hosts a `web` pod, you may see no failures at all, because the API check doesn't touch `web`. Requests still succeed, so that's a pass.
+Measured in 5x2 on a laptop plus one Pi: 3 failed requests in the first 15 s, then none. With a single worker, replacements stay `Pending` because no other Pi exists. Do not pull the master.
 
 ## 7. Development with Docker Compose
 
@@ -251,6 +239,7 @@ k8s/
   nginx.conf          nginx routing (same file Docker Compose uses)
   traefik.yaml        Runs the built-in Traefik with 2 replicas
 deploy.sh             Creates the Secret and applies k8s/
+preload.sh            Caches every image on every Pi
 test.sh               Login, sign, verify check
 docker-compose.yml    Development only
 DEMO.md               Demo-day checklist
@@ -263,8 +252,11 @@ DEMO.md               Demo-day checklist
 | `ImagePullBackOff`                         | Image name wrong, or the registry package is private. Check `k8s/kustomization.yaml` and the registry |
 | `exec format error` in pod logs            | Image built for the wrong CPU. Rebuild with `--platform linux/arm64,linux/amd64`                       |
 | Pi stays `NotReady` or k3s agent won't start | Memory cgroups missing. Check `cmdline.txt` and reboot                                              |
+| Pi joins but pods on it cannot reach other pods | Flannel picked the Wi-Fi address. Set `--flannel-iface` on the master and `flannel-iface: eth0` on the Pi |
+| `curl: Failed to connect to update.k3s.io` | Pin `INSTALL_K3S_VERSION` as shown in section 3                                                  |
+| `ImagePullBackOff` on one Pi only          | That Pi has no cached image and no internet. Run `./preload.sh`                                 |
 | Pod `OOMKilled`                            | A Pi 3 B+ has 1 GB RAM. Lower replicas of `web` or raise its limit in `k8s/app.yaml`                   |
-| Requests fail for more than 30 s after pulling a Pi | Check `kubectl get nodes` and that every service has 2 replicas on different nodes           |
+| Requests fail for more than 30 s after pulling a Pi | Check `kubectl get nodes` and `kubectl get pods -o wide`. Replacements need a free Pi and a cached image |
 | `404` or blank page                        | Wait for `./deploy.sh` to finish, then check `kubectl get ingress` and `kubectl get pods`              |
 | Login works but `/api/sign` returns 401    | `SESSION_SECRET` changed after login. Sign in again                                                    |
 | Commands like `./deploy.sh` fail on Windows | Use Git Bash, not Command Prompt or PowerShell                                                      |
