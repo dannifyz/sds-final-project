@@ -1,0 +1,18 @@
+resources:
+  - app.yaml
+  - traefik.yaml
+configMapGenerator:
+  - name: nginx-conf
+    files:
+      - default.conf=nginx.conf
+generatorOptions:
+  disableNameSuffixHash: true
+images:
+  - name: sds/auth-service
+    newName: ghcr.io/poongeta/auth-service
+  - name: sds/signing-service
+    newName: ghcr.io/poongeta/signing-service
+  - name: sds/qr-service
+    newName: ghcr.io/poongeta/qr-service
+  - name: sds/web
+    newName: ghcr.io/poongeta/web
